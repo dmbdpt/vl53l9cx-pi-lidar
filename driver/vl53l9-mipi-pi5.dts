@@ -21,13 +21,27 @@
  *   MIPI1 (default) csi1   i2c_csi_dsi  -> i2c-4    46 (CD1_IO0)      cam1_reg
  *   MIPI0 (,cam0)   csi0   i2c_csi_dsi0 -> i2c-6    34 (CD0_IO0)      cam0_reg
  *
- * Every connector-specific setting (I2C bus, CSI port, XSHUT line, regulator) is
- * switched together by the cam0 parameter, so the two variants can't disagree.
+ * AP_CLK: the STEVAL ships strapped for a host-supplied reference clock on FFC
+ * pin 18 (CAM_IO1 / "XCLK"). On the Pi 5 that pin is RP1 GPIO 35 (MIPI0) / 48
+ * (MIPI1), which has no GPCLK function, only PWM1_CHAN0 (the fan uses
+ * PWM1_CHAN3). The sensor node muxes that pin to pwm1 and dummy_cam runs channel
+ * 0 at 12.5 MHz = 4 ticks of RP1's 50 MHz PWM clock (VL53L9 accepts 6-27 MHz;
+ * an exact 12 MHz would need a fractional divider). Boards modified to use the
+ * onboard 12 MHz oscillator: load dummy_cam with ap_clk=0.
+ *
+ *   connector       AP_CLK pin (FFC 18)
+ *   MIPI1 (default) RP1 GPIO 48 (CD1_IO1)
+ *   MIPI0 (,cam0)   RP1 GPIO 35 (CD0_IO1; the kernel labels it CD0_IO0_MICDAT0)
+ *
+ * Every connector-specific setting (I2C bus, CSI port, XSHUT line, regulator,
+ * AP_CLK pin) is switched together by the cam0 parameter, so the two variants can't disagree.
  *
  *     dtoverlay=vl53l9-mipi-pi5           # MIPI1 (main port)
  *     dtoverlay=vl53l9-mipi-pi5,cam0      # MIPI0 (second port)
  *
- * Optional: xshut_gpio=<n> overrides the XSHUT line number (applied after cam0).
+ * Optional: xshut_gpio=<n> overrides the XSHUT line number (applied after cam0);
+ *           ap_clk_hz=<hz> changes the AP_CLK frequency (6-27 MHz; RP1 can only
+ *           make 50 MHz / N, N >= 2, e.g. 12500000, 10000000, 8333333).
  *
  * Build (needs the C preprocessor for the #include):
  *     make overlay      # or see README
@@ -73,6 +87,14 @@
 				 * the cam0 / xshut_gpio parameters below. */
 				xshut-gpios = <&gpio 46 GPIO_ACTIVE_HIGH>;
 
+				/* AP_CLK: PWM1 channel 0 on FFC pin 18. The period
+				 * cell is informational; dummy_cam programs the
+				 * frequency from vl53l9,ap-clk-hz. */
+				pinctrl-names = "default";
+				pinctrl-0 = <&vl53l9_apclk_pins>;
+				pwms = <&rp1_pwm1 0 80 0>;
+				vl53l9,ap-clk-hz = <12500000>;
+
 				port {
 					sensor_to_csi: endpoint {
 						remote-endpoint = <&csi_to_sensor>;
@@ -93,11 +115,24 @@
 		};
 	};
 
+	fragment@4 {
+		target = <&rp1_gpio>;
+		__overlay__ {
+			vl53l9_apclk_pins: vl53l9_apclk_pins {
+				function = "pwm1";
+				pins = "gpio48";
+				bias-disable;
+			};
+		};
+	};
+
 	__overrides__ {
 		cam0 = <&i2c_frag>, "target:0=", <&i2c_csi_dsi0>,
 		       <&csi_frag>, "target:0=", <&csi0>,
 		       <&reg_frag>, "target:0=", <&cam0_reg>,
-		       <&vl53l9_sensor>, "xshut-gpios:4=34";
+		       <&vl53l9_sensor>, "xshut-gpios:4=34",
+		       <&vl53l9_apclk_pins>, "pins=gpio35";
 		xshut_gpio = <&vl53l9_sensor>, "xshut-gpios:4";
+		ap_clk_hz = <&vl53l9_sensor>, "vl53l9,ap-clk-hz:0";
 	};
 };

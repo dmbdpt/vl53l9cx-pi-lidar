@@ -44,6 +44,7 @@ pkill -f 'headless_dec[o]de.py' 2>/dev/null
 pkill -f 'v4l2-ctl.*stream-mmap' 2>/dev/null
 sleep 1
 
+vl_pi5_ext_clock
 vl_pi5_reset_sensor
 vl_pi5_find_bus "$REPO"
 vl_pi5_find_nodes

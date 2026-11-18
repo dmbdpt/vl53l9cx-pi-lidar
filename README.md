@@ -41,13 +41,30 @@ ST result buffer, and colour-maps the depth array — all at the sensor's full 1
 | STEVAL-VL53L9 | ST evaluation board carrying the VL53L9CX module |
 | FFC / flex cable | STEVAL flex → Pi CSI (camera) connector: 1 MIPI data lane + I²C |
 
-### Wiring note — sensor clock (12 MHz)
+### Wiring note — sensor clock (AP_CLK)
 
-The bring-up configures the VL53L9CX for a **12 MHz** reference clock on AP_CLK. The Pi
-camera connector does not supply a clock, so either the STEVAL's onboard oscillator must
-be enabled (ST's board resistor options) or you feed 12 MHz from the Pi, e.g. a GPCLK on
-the 40-pin header. With no clock the sensor never ACKs on I²C — the launchers report
-this as "sensor did not ACK".
+The VL53L9CX needs a reference clock on AP_CLK (6–27 MHz) before it will even ACK on
+I²C. The STEVAL ships strapped for a **host-supplied** clock on FFC pin 18
+(CAM_IO1, "LED enable / XCLK"); its onboard 12 MHz oscillator is disabled.
+
+- **Pi 5 (no board changes):** pin 18 is RP1 GPIO 35 (MIPI0) / 48 (MIPI1), which has no
+  GPCLK function, only PWM1 channel 0. The overlay muxes it to PWM and `dummy_cam`
+  runs it at **12.5 MHz** (4 ticks of RP1's 50 MHz PWM clock, 50 % duty) from boot,
+  before XSHUT is released. It reports the frequency in
+  `/sys/devices/platform/vl53l9/ap_clk_hz`, and the launchers pass it to the
+  bring-up app (`--ext-clock`), so the sensor's timing stays correct. The fan uses
+  PWM1 channel 3, so they don't interfere.
+- **Boards modified for the onboard oscillator** (R25 and R23 removed): load
+  `dummy_cam` with `ap_clk=0` (e.g. `options dummy_cam ap_clk=0` in
+  `/etc/modprobe.d/vl53l9.conf`); the bring-up then assumes 12 MHz.
+- **Pi 4:** nothing on the 15-pin connector provides a clock; feed 12 MHz from a
+  header GPCLK (e.g. GPIO 4) or enable the onboard oscillator.
+
+Check: `dmesg | grep AP_CLK` should show `AP_CLK: 12500000 Hz on PWM`, and
+`scripts/test/run_stream_test.sh` should report ~100 fps. A clearly different rate (e.g. ~80 or ~133 fps) likely means
+the real clock and `--ext-clock` disagree (the RP1 PWM period quirk is handled by
+`dummy_cam`'s `ap_clk_legacy_tick_ns` parameter: 20 on Raspberry Pi kernels up to
+6.12, ignored on kernels with the PWM waveform API).
 
 ### Wiring note — XSHUT
 

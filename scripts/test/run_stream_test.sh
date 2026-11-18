@@ -14,6 +14,7 @@ pkill -f 'headless_dec[o]de.py' 2>/dev/null
 pkill -f 'v4l2-ctl.*stream-mmap' 2>/dev/null
 sleep 0.3
 
+vl_pi5_ext_clock
 vl_pi5_reset_sensor
 vl_pi5_find_bus "$REPO"
 vl_pi5_find_nodes
@@ -36,6 +37,8 @@ sleep 1.5
 echo ---DECODE---
 sleep 8
 tail -25 /tmp/decode.log
+echo "[i] Expect ~100 fps. A clearly different rate (e.g. ~80 or ~133) likely means the AP_CLK the sensor gets differs"
+echo "    from what bring-up told it (VL_EXT_CLOCK=$VL_EXT_CLOCK): sensor timing scales with it."
 echo ---V4L2LOG---
 tail -5 /tmp/v4l2.log
 echo ---DMESG---

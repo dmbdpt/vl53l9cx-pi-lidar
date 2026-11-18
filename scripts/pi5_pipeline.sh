@@ -3,6 +3,7 @@
 # not run anything on its own.
 #
 #   vl_pi5_reset_sensor            XSHUT-cycle the sensor (fresh READY_TO_BOOT)
+#   vl_pi5_ext_clock               -> VL_EXT_CLOCK (AP_CLK Hz, exported)
 #   vl_pi5_find_bus                -> VL_I2C_BUS  (bus where 0x29 ACKs)
 #   vl_pi5_find_nodes              -> VL_MEDIA VL_SENSOR_SD VL_CSI2_SD VL_VIDEO
 #   vl_pi5_configure W H           set pad/video formats, enable link -> VL_STRIDE
@@ -39,6 +40,18 @@ vl_pi5_reset_sensor() {
     sleep 0.1
 }
 
+# AP_CLK actually fed to the sensor (dummy_cam PWM, 0 = external/onboard clock).
+vl_pi5_ext_clock() {
+    local hz
+    hz=$(cat "$VL_XSHUT_DIR/ap_clk_hz" 2>/dev/null || echo 0)
+    if [ "${hz:-0}" -gt 0 ]; then
+        VL_EXT_CLOCK=$hz; echo "[+] AP_CLK from Pi PWM: $hz Hz"
+    else
+        VL_EXT_CLOCK=${VL_EXT_CLOCK:-12000000}; echo "[i] AP_CLK not driven by the Pi; assuming $VL_EXT_CLOCK Hz (set VL_EXT_CLOCK)"
+    fi
+    export VL_EXT_CLOCK
+}
+
 # Find the camera I2C bus the sensor ACKs on (MIPI0 = i2c-6, MIPI1 = i2c-4).
 vl_pi5_find_bus() {
     local repo="$1" b
@@ -51,7 +64,7 @@ vl_pi5_find_bus() {
     done
     vl_die "sensor did not ACK on /dev/i2c-6 or /dev/i2c-4 after the XSHUT cycle.
     Check: FFC seated, overlay connector matches the cable (cam0 = MIPI0),
-    12 MHz clock on the STEVAL AP_CLK (onboard oscillator or external GPCLK)."
+    AP_CLK present (cat $VL_XSHUT_DIR/ap_clk_hz; dmesg | grep -i ap_clk)."
 }
 
 vl_pi5_find_nodes() {

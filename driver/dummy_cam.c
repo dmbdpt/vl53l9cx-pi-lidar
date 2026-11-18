@@ -15,6 +15,16 @@
  *           -> drive XSHUT LOW / HIGH directly
  *   remove  -> XSHUT LOW
  *
+ * AP_CLK (sensor reference clock): the STEVAL ships strapped for a host-supplied
+ * clock on camera connector pin 18 (CAM_IO1 / "XCLK"). On the Pi 5 that pin is
+ * RP1 GPIO 35 (MIPI0) / 48 (MIPI1), which has no GPCLK function -- only
+ * PWM1_CHAN0. If the DT node has a "pwms" property, this driver runs that PWM
+ * as the clock (default 12.5 MHz = 4 ticks of RP1's 50 MHz PWM clock, 50% duty)
+ * from probe until remove, i.e. before XSHUT is ever released. The frequency is
+ * exported as /sys/devices/platform/vl53l9/ap_clk_hz so the bring-up app can tell
+ * the sensor (VL53L9 accepts 6-27 MHz). Boards using the onboard oscillator:
+ * load with ap_clk=0.
+ *
  * Link frequency: the RP1 CFE programs its D-PHY from V4L2_CID_LINK_FREQ. The
  * bring-up app runs the sensor at 1 Gbps/lane (DDR) = 500 MHz link frequency.
  * If you change csi_data_rate in the bring-up app, load this module with
@@ -28,6 +38,8 @@
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/gpio/consumer.h>
+#include <linux/pwm.h>
+#include <linux/property.h>
 #include <linux/version.h>
 #include <media/v4l2-subdev.h>
 #include <media/v4l2-ctrls.h>
@@ -46,6 +58,25 @@ module_param(link_freq_hz, ulong, 0444);
 MODULE_PARM_DESC(link_freq_hz,
 		 "CSI-2 link frequency in Hz reported to the receiver (default 500000000 = 1 Gbps/lane)");
 
+static bool ap_clk = true;
+module_param(ap_clk, bool, 0444);
+MODULE_PARM_DESC(ap_clk, "Drive AP_CLK from the DT 'pwms' PWM (default 1; 0 for boards with the onboard oscillator)");
+
+/*
+ * Kernels whose PWM driver lacks the waveform API (all Raspberry Pi kernels up
+ * to at least rpi-6.12) program RP1's RANGE register with period/tick, but the
+ * hardware period is RANGE + 1 ticks (see the upstream pwm-rp1 driver). Request
+ * one tick less there so the output really is 4 ticks = 12.5 MHz.
+ */
+static unsigned int ap_clk_legacy_tick_ns = 20;
+module_param(ap_clk_legacy_tick_ns, uint, 0444);
+MODULE_PARM_DESC(ap_clk_legacy_tick_ns,
+		 "Legacy-PWM-API period correction in ns (default 20 = one RP1 PWM tick at 50 MHz; 0 = none)");
+
+#define VL53L9_AP_CLK_DEFAULT_HZ  12500000U
+#define VL53L9_AP_CLK_MIN_HZ      6000000U
+#define VL53L9_AP_CLK_MAX_HZ      27000000U
+
 /* RAW8, CSI-2 datatype 0x2A. Y8 maps to GREY, SRGGB8 to 'RGGB' on both receivers. */
 static const u32 dummy_mbus_codes[] = {
 	MEDIA_BUS_FMT_Y8_1X8,
@@ -63,6 +94,8 @@ struct dummy_cam {
 	struct v4l2_mbus_framefmt fmt;
 
 	struct gpio_desc *xshut;	/* optional */
+	struct pwm_device *ap_clk;	/* optional, AP_CLK from a PWM */
+	u32 ap_clk_hz;			/* 0 = not driven by this driver */
 };
 
 static inline struct dummy_cam *to_dummy(struct v4l2_subdev *sd)
@@ -233,7 +266,17 @@ static ssize_t xshut_cycle_store(struct device *dev,
 }
 static DEVICE_ATTR_RW(xshut_cycle);
 
+static ssize_t ap_clk_hz_show(struct device *dev,
+			      struct device_attribute *attr, char *buf)
+{
+	struct dummy_cam *dc = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%u\n", dc ? dc->ap_clk_hz : 0);
+}
+static DEVICE_ATTR_RO(ap_clk_hz);
+
 static struct attribute *dummy_attrs[] = {
+	&dev_attr_ap_clk_hz.attr,
 	&dev_attr_xshut_cycle.attr,
 	&dev_attr_xshut_state.attr,
 	NULL,
@@ -243,6 +286,79 @@ ATTRIBUTE_GROUPS(dummy);
 /* ------------------------------------------------------------------------- */
 /* Probe / remove                                                            */
 /* ------------------------------------------------------------------------- */
+
+static int dummy_ap_clk_start(struct device *dev, struct dummy_cam *dc)
+{
+	u32 hz = VL53L9_AP_CLK_DEFAULT_HZ;
+	u64 period_ns;
+	int ret;
+
+	if (!ap_clk)
+		return 0;
+
+	dc->ap_clk = devm_pwm_get(dev, NULL);
+	if (IS_ERR(dc->ap_clk)) {
+		ret = PTR_ERR(dc->ap_clk);
+		dc->ap_clk = NULL;
+		if (ret == -EPROBE_DEFER)
+			return ret;
+		/* No pwms property: AP_CLK comes from elsewhere (onboard osc). */
+		dev_info(dev, "no AP_CLK PWM (%d); expecting an external/onboard clock\n", ret);
+		return 0;
+	}
+
+	device_property_read_u32(dev, "vl53l9,ap-clk-hz", &hz);
+	if (hz < VL53L9_AP_CLK_MIN_HZ || hz > VL53L9_AP_CLK_MAX_HZ) {
+		dev_err(dev, "vl53l9,ap-clk-hz %u outside 6-27 MHz\n", hz);
+		return -EINVAL;
+	}
+	period_ns = DIV_ROUND_CLOSEST_ULL(NSEC_PER_SEC, hz);
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+	if (dc->ap_clk->chip->ops->write_waveform) {
+		struct pwm_waveform wf = {
+			.period_length_ns = period_ns,
+			.duty_length_ns = period_ns / 2,
+			.duty_offset_ns = 0,
+		};
+
+		ret = pwm_set_waveform_might_sleep(dc->ap_clk, &wf, true);
+		if (ret == -EDOM || ret == 1)	/* not exactly representable: take nearest */
+			ret = pwm_set_waveform_might_sleep(dc->ap_clk, &wf, false);
+		if (ret < 0)
+			return dev_err_probe(dev, ret, "failed to start AP_CLK PWM\n");
+		goto started;
+	}
+#endif
+	{
+		struct pwm_state st;
+
+		pwm_init_state(dc->ap_clk, &st);
+		st.period = period_ns - min_t(u64, ap_clk_legacy_tick_ns, period_ns / 2);
+		st.duty_cycle = period_ns / 2;
+		st.polarity = PWM_POLARITY_NORMAL;
+		st.enabled = true;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
+		ret = pwm_apply_might_sleep(dc->ap_clk, &st);
+#else
+		ret = pwm_apply_state(dc->ap_clk, &st);
+#endif
+		if (ret)
+			return dev_err_probe(dev, ret, "failed to start AP_CLK PWM\n");
+	}
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+started:
+#endif
+	dc->ap_clk_hz = hz;
+	dev_info(dev, "AP_CLK: %u Hz on PWM (period %llu ns, 50%% duty)\n", hz, period_ns);
+	return 0;
+}
+
+static void dummy_ap_clk_stop(struct dummy_cam *dc)
+{
+	if (dc->ap_clk && dc->ap_clk_hz)
+		pwm_disable(dc->ap_clk);
+}
 
 static int dummy_probe(struct platform_device *pdev)
 {
@@ -264,6 +380,11 @@ static int dummy_probe(struct platform_device *pdev)
 		dev_err_probe(dev, ret, "failed to get xshut-gpios\n");
 		goto err_mutex;
 	}
+	/* Clock first: the sensor must see AP_CLK before XSHUT is released. */
+	ret = dummy_ap_clk_start(dev, dc);
+	if (ret)
+		goto err_mutex;
+
 	if (dc->xshut)
 		dev_info(dev, "XSHUT held LOW; write 1 to xshut_cycle to boot the sensor\n");
 	else
@@ -314,6 +435,7 @@ err_entity:
 	media_entity_cleanup(&dc->sd.entity);
 err_ctrls:
 	v4l2_ctrl_handler_free(&dc->ctrls);
+	dummy_ap_clk_stop(dc);
 err_mutex:
 	mutex_destroy(&dc->lock);
 	return ret;
@@ -333,6 +455,7 @@ static void dummy_remove(struct platform_device *pdev)
 		gpiod_set_value_cansleep(dc->xshut, 0);
 		mutex_unlock(&dc->lock);
 	}
+	dummy_ap_clk_stop(dc);
 	mutex_destroy(&dc->lock);
 }
 
@@ -358,4 +481,4 @@ static struct platform_driver dummy_driver = {
 module_platform_driver(dummy_driver);
 
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("VL53L9CX stub MIPI CSI-2 sensor with optional GPIO XSHUT control");
+MODULE_DESCRIPTION("VL53L9CX stub MIPI CSI-2 sensor with optional XSHUT GPIO and PWM AP_CLK");

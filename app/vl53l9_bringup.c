@@ -77,23 +77,38 @@ static int open_i2c_bus(const char *opt_path, uint8_t addr7, const char **used_o
     }
     fprintf(stderr, "[-] VL53L9 did not ACK at 0x%02X on any of /dev/i2c-6, /dev/i2c-4, /dev/i2c-10.\n"
                     "    Is XSHUT high (Pi 5: echo 1 > /sys/devices/platform/vl53l9/xshut_cycle),\n"
-                    "    is the 12 MHz sensor clock present, is the FFC seated? Or pass --i2c PATH.\n",
+                    "    is AP_CLK running (Pi 5: cat /sys/devices/platform/vl53l9/ap_clk_hz), is the\n"
+                    "    FFC seated? Or pass --i2c PATH.\n",
             addr7);
     return -1;
 }
 
 int main(int argc, char **argv) {
-    /* Options: --i2c PATH (adapter node), --addr N (7-bit slave address).
+    /* Options: --i2c PATH (adapter node), --addr N (7-bit slave address),
+     * --ext-clock HZ (AP_CLK frequency the sensor is fed; default 12 MHz, or
+     * $VL_EXT_CLOCK -- the Pi 5 PWM clock is 12.5 MHz, see dummy_cam).
      * Remaining positional args: [usecase] [exp_ms] [period_us] [power_mode] [dss_mode]. */
     const char *opt_i2c = NULL;
     int opt_addr = -1;
+    long opt_ext_clock = -1;
     static char *pos[8];
     int npos = 0;
     pos[npos++] = argv[0];
     for (int i = 1; i < argc && npos < 8; i++) {
         if (!strcmp(argv[i], "--i2c") && i + 1 < argc)      { opt_i2c = argv[++i]; continue; }
         if (!strcmp(argv[i], "--addr") && i + 1 < argc)    { opt_addr = atoi(argv[++i]); continue; }
+        if (!strcmp(argv[i], "--ext-clock") && i + 1 < argc) { opt_ext_clock = atol(argv[++i]); continue; }
         pos[npos++] = argv[i];
+    }
+
+    /* AP_CLK: --ext-clock > $VL_EXT_CLOCK > 12 MHz. Must match the real clock;
+       VL53L9 accepts 6-27 MHz. */
+    if (opt_ext_clock < 0 && getenv("VL_EXT_CLOCK") && *getenv("VL_EXT_CLOCK"))
+        opt_ext_clock = atol(getenv("VL_EXT_CLOCK"));
+    if (opt_ext_clock < 0) opt_ext_clock = 12000000;
+    if (opt_ext_clock < 6000000 || opt_ext_clock > 27000000) {
+        fprintf(stderr, "[-] --ext-clock %ld Hz outside the sensor's 6-27 MHz range\n", opt_ext_clock);
+        return 1;
     }
 
     int usecase = (npos > 1) ? atoi(pos[1]) : VL53L9_USECASE_AF_RANGE;
@@ -130,7 +145,8 @@ int main(int argc, char **argv) {
     dev.bus = (void*)(intptr_t)fd;
     dev.bus_type = PLATFORM_BUS_I2C;
     dev.address = (uint8_t)(addr7 << 1);   /* ULD keeps the 8-bit form */
-    dev.ext_clock = 12000000;
+    dev.ext_clock = (uint32_t)opt_ext_clock;
+    printf("[+] AP_CLK (ext_clock) = %ld Hz\n", opt_ext_clock);
     dev.vdda = VDDA_2V8;
     dev.vddio = VDDIO_1V8;
     if (addr7 == 0x29) {
