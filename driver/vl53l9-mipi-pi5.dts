@@ -9,23 +9,28 @@
  *   - the connector I2C bus enabled so userspace can talk to the sensor,
  *   - a dummy CSI-2 sensor subdevice node matched by driver/dummy_cam.ko.
  *
- * XSHUT: on this module the VL53L9's XSHUT pin is wired straight to MIPI0
- * connector pin 17 = CD0_IO0 = RP1 GPIO line 34, and there is NO power-enable
- * net at all (the sensor rail is always on). So instead of a vdd-supply the
- * sensor node declares xshut-gpios, and cam0_reg -- which the baseboard
- * defines as a camera-rail enable regulator on that same line -- is disabled
- * so it stops claiming/driving it. dummy_cam.ko then owns line 34 exclusively
- * and exposes /sys/devices/platform/vl53l9/xshut_cycle. Polarity: XSHUT must
- * be held HIGH for the sensor to initialize/run; LOW = shutdown, so the driver
- * always leaves the line HIGH after a reset edge.
- * NOTE: this matches the current FFC wiring (second port, cam0 variant). If
- * the cable moves to the main port (MIPI1), XSHUT would be on line 46 and
- * cam1_reg would need disabling instead -- adjust xshut-gpios accordingly.
+ * XSHUT: on the 22-pin camera FFC, pin 17 (CAM_IO0) -- which the Pi 5 baseboard
+ * normally uses as the camera-rail enable (cam0_reg / cam1_reg) -- reaches the
+ * VL53L9's XSHUT pin. The STEVAL module has no separate power-enable net, so the
+ * sensor node claims that line as xshut-gpios and the matching camN_reg is
+ * disabled so it stops claiming/driving it. dummy_cam.ko then owns the line and
+ * exposes /sys/devices/platform/vl53l9/xshut_{cycle,state}.
+ * XSHUT HIGH = run, LOW = shutdown.
  *
- * Default: MIPI1 connector = main camera port (csi1 + i2c_csi_dsi -> /dev/i2c-4),
- * matching the official imx500-pi5 convention and the Pi 4 csi1 layout.
- * For the second CSI port (MIPI0: csi0 + i2c_csi_dsi0 -> /dev/i2c-6) use:
- *     dtoverlay=vl53l9-mipi-pi5,cam0
+ *   connector       CSI    I2C bus                  XSHUT (RP1 GPIO)  regulator
+ *   MIPI1 (default) csi1   i2c_csi_dsi  -> i2c-4    46 (CD1_IO0)      cam1_reg
+ *   MIPI0 (,cam0)   csi0   i2c_csi_dsi0 -> i2c-6    34 (CD0_IO0)      cam0_reg
+ *
+ * Every connector-specific setting (I2C bus, CSI port, XSHUT line, regulator) is
+ * switched together by the cam0 parameter, so the two variants can't disagree.
+ *
+ *     dtoverlay=vl53l9-mipi-pi5           # MIPI1 (main port)
+ *     dtoverlay=vl53l9-mipi-pi5,cam0      # MIPI0 (second port)
+ *
+ * Optional: xshut_gpio=<n> overrides the XSHUT line number (applied after cam0).
+ *
+ * Build (needs the C preprocessor for the #include):
+ *     make overlay      # or see README
  */
 #include <dt-bindings/gpio/gpio.h>
 
@@ -64,12 +69,9 @@
 				compatible = "raspberrypi,dummy-csi2-sensor";
 				status = "okay";
 
-				/* VL53L9 XSHUT: must be held HIGH for the sensor to
-				 * initialize/run, LOW = shutdown (ROM boots to
-				 * READY_TO_BOOT after a release edge). See header note
-				 * above -- no vdd-supply exists because this module has
-				 * no power-enable net; dummy_cam.ko owns this line. */
-				xshut-gpios = <&gpio 34 GPIO_ACTIVE_HIGH>;
+				/* Cell 1 (byte offset 4) is the GPIO number; patched by
+				 * the cam0 / xshut_gpio parameters below. */
+				xshut-gpios = <&gpio 46 GPIO_ACTIVE_HIGH>;
 
 				port {
 					sensor_to_csi: endpoint {
@@ -80,19 +82,22 @@
 		};
 	};
 
-	cam0reg_frag: fragment@3 {
-		target = <&cam0_reg>;
+	reg_frag: fragment@3 {
+		target = <&cam1_reg>;
 		__overlay__ {
-			/* Baseboard thinks line 34 is a camera-rail enable; on this
-			 * module it is XSHUT. Left active it would (a) hold the sensor
-			 * in shutdown while "enabled" and (b) keep the GPIO claimed so
-			 * dummy_cam.ko could not use it as xshut-gpios. */
+			/* The baseboard treats this line as a camera-rail enable; on
+			 * the STEVAL it is XSHUT. Left active, the fixed regulator
+			 * would claim the GPIO (so dummy_cam could not) and, having no
+			 * consumer, hold it LOW = sensor in shutdown. */
 			status = "disabled";
 		};
 	};
 
 	__overrides__ {
 		cam0 = <&i2c_frag>, "target:0=", <&i2c_csi_dsi0>,
-		       <&csi_frag>, "target:0=", <&csi0>;
+		       <&csi_frag>, "target:0=", <&csi0>,
+		       <&reg_frag>, "target:0=", <&cam0_reg>,
+		       <&vl53l9_sensor>, "xshut-gpios:4=34";
+		xshut_gpio = <&vl53l9_sensor>, "xshut-gpios:4";
 	};
 };
