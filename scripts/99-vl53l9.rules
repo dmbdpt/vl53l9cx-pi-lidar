@@ -1,0 +1,5 @@
+# Let members of the "video" group drive the VL53L9 XSHUT line without sudo.
+# Install:  sudo cp scripts/99-vl53l9.rules /etc/udev/rules.d/ && sudo udevadm control --reload
+#           then reboot (or unbind/bind dummy_cam). Check: ls -l /sys/devices/platform/vl53l9/xshut_*
+ACTION=="bind", SUBSYSTEM=="platform", DRIVER=="dummy_cam", \
+  RUN+="/bin/sh -c 'chgrp video /sys%p/xshut_cycle /sys%p/xshut_state && chmod g+w /sys%p/xshut_cycle /sys%p/xshut_state'"

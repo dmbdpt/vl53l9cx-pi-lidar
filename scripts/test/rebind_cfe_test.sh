@@ -1,22 +1,13 @@
 #!/bin/bash
-# Rebind CFE (restores AP_CLK path) and poll for VL53L9 @ 0x29 on i2c-10.
+# Rebind the RP1 CFE driver, XSHUT-cycle the sensor and check it answers on I2C.
 set -u
 REPO="$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)"
 [ -x "$REPO/tools/i2c_id" ] || make -C "$REPO/tools" >/dev/null
-echo "=== rebind rp1-cfe ==="
-echo 1f00110000.csi > /sys/bus/platform/drivers/rp1-cfe/bind && echo REBIND_OK || echo REBIND_FAIL
+CFE=$(basename "$(readlink -f /sys/bus/platform/drivers/rp1-cfe/*.csi 2>/dev/null | head -1)")
+[ -n "$CFE" ] && [ "$CFE" != . ] || CFE=1f00110000.csi
+echo "=== rebind rp1-cfe ($CFE) ==="
+echo "$CFE" > /sys/bus/platform/drivers/rp1-cfe/unbind 2>/dev/null
+echo "$CFE" > /sys/bus/platform/drivers/rp1-cfe/bind && echo REBIND_OK || echo REBIND_FAIL
 dmesg | tail -3
-
-found=0
-for i in $(seq 1 40); do
-    if i2cdetect -y 10 2>/dev/null | grep -q '\[29\]'; then
-        found=1
-        echo "ACK at 0x29 after $((i/2)) s"
-        break
-    fi
-    sleep 0.5
-done
-[ "$found" = 1 ] || { echo "NO ACK within 20 s of rebind"; exit 1; }
-
-echo "=== model ID via i2c_probe ==="
-"$REPO/tools/i2c_id" /dev/i2c-10
+echo 1 > /sys/devices/platform/vl53l9/xshut_cycle
+"$REPO/tools/i2c_id" /dev/i2c-6 /dev/i2c-4
