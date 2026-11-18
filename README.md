@@ -41,6 +41,14 @@ ST result buffer, and colour-maps the depth array — all at the sensor's full 1
 | STEVAL-VL53L9 | ST evaluation board carrying the VL53L9CX module |
 | FFC / flex cable | STEVAL flex → Pi CSI (camera) connector: 1 MIPI data lane + I²C |
 
+### Wiring note — sensor clock (12 MHz)
+
+The bring-up configures the VL53L9CX for a **12 MHz** reference clock on AP_CLK. The Pi
+camera connector does not supply a clock, so either the STEVAL's onboard oscillator must
+be enabled (ST's board resistor options) or you feed 12 MHz from the Pi, e.g. a GPCLK on
+the 40-pin header. With no clock the sensor never ACKs on I²C — the launchers report
+this as "sensor did not ACK".
+
 ### Wiring note — XSHUT
 
 The VL53L9CX's **XSHUT** (enable) pin must be held **HIGH** for the sensor to boot and
@@ -61,8 +69,8 @@ run; LOW = shutdown. How it is handled differs per board:
   cat /sys/devices/platform/vl53l9/xshut_state                     # 1 = running
   ```
 
-  `run_lidar_web.sh` does this automatically when the sensor is in shutdown. If your cable
-  sits on MIPI1 instead of MIPI0, XSHUT moves to line 46 — see
+  The Pi 5 launchers do this on every run. If your cable sits on MIPI1 instead of MIPI0,
+  XSHUT is line 46; the overlay's `cam0` parameter picks the right one — see
   [`driver/vl53l9-mipi-pi5.dts`](driver/vl53l9-mipi-pi5.dts).
 
 ---
@@ -86,11 +94,13 @@ run; LOW = shutdown. How it is handled differs per board:
 │   └── headless_decode.py    # no-display frame verifier / FPS + stats logger
 ├── web/                      # full Web Studio: gestures, theremin, recording, PLY export
 ├── vendor/st-uld/            # ST VL53L9CX ULD driver (SLA0111) — see LICENSE.txt
-├── scripts/                  # .desktop launchers + xshut_finder.py; test/ = RPi5 bring-up tests
+├── python/vl53l9_stream.py   # numpy frame reader for your own processing (FIFO -> arrays)
+├── scripts/                  # .desktop launchers, pi5_pipeline.sh (shared Pi 5 setup),
+│                             #   99-vl53l9.rules (sudo-less XSHUT); test/ = RPi5 tests
 ├── run_lidar.sh              # Pi 4: one-shot build-if-needed, stream + OpenCV viewer
 ├── run_lidar_gpu.sh          # Pi 4: GPU particle viewer
 ├── run_lidar_web.sh          # Pi 5 (CFE pipeline): web dashboard on :8080
-├── Makefile                  # builds the bring-up app (+ module / tools targets)
+├── Makefile                  # app; module(_install), overlay(_install), tools targets
 └── docs/
 ```
 
@@ -102,38 +112,46 @@ run; LOW = shutdown. How it is handled differs per board:
 
 The Pi needs a subdevice bound to the CSI port so the receiver will enable and DMA the
 sensor's stream (the VL53L9CX is controlled out-of-band over I²C, so a small stub sensor
-driver stands in on the media graph). Build it once:
+driver stands in on the media graph). Install the kernel headers, then build and
+**install** the module so it loads automatically on every boot (`insmod` alone does not
+survive the reboot below):
 
 ```bash
+sudo apt install linux-headers-$(uname -r) device-tree-compiler v4l-utils
 make module                    # -> driver/dummy_cam.ko
+sudo make module_install       # -> /lib/modules/$(uname -r)/updates + depmod
+make overlay                   # -> vl53l9-mipi.dtbo + vl53l9-mipi-pi5.dtbo (cpp | dtc)
+sudo make overlay_install      # -> /boot/firmware/overlays/
 ```
 
-**Raspberry Pi 4:**
+(The Pi 5 overlay `#include`s a dt-bindings header, so it must go through the C
+preprocessor before `dtc`; `make overlay` does that. Plain `dtc -I dts …` will not work.)
 
-```bash
-sudo insmod driver/dummy_cam.ko
-dtc -@ -I dts -O dtb -o vl53l9-mipi.dtbo driver/vl53l9-mipi.dts
-sudo cp vl53l9-mipi.dtbo /boot/firmware/overlays/
-# then add to /boot/firmware/config.txt:   dtoverlay=vl53l9-mipi
-sudo reboot
+Then add **one** line to `/boot/firmware/config.txt` and reboot:
+
+```
+dtoverlay=vl53l9-mipi                 # Raspberry Pi 4
+dtoverlay=vl53l9-mipi-pi5,cam0        # Raspberry Pi 5, sensor on MIPI0 (cam0 port)
+dtoverlay=vl53l9-mipi-pi5             # Raspberry Pi 5, sensor on MIPI1 (cam1 port)
 ```
 
-**Raspberry Pi 5** (RP1 CFE receiver; `-Idriver` provides the dt-bindings header):
+On the Pi 5 the `cam0` parameter switches the I²C bus, CSI port, XSHUT line (RP1 GPIO
+34 vs 46) and the disabled camera regulator together. The MIPI0 variant is the one that
+has been tested on hardware; the MIPI1 variant follows the same wiring logic but is
+untested. `xshut_gpio=<n>` overrides the XSHUT line if your cable differs.
+
+Optional, Pi 5: let the `video` group reset the sensor without sudo:
 
 ```bash
-sudo insmod driver/dummy_cam.ko
-dtc -@ -I dts -Idriver -O dtb -o vl53l9-mipi-pi5.dtbo driver/vl53l9-mipi-pi5.dts
-sudo cp vl53l9-mipi-pi5.dtbo /boot/firmware/overlays/
-# then add to /boot/firmware/config.txt:   dtoverlay=vl53l9-mipi-pi5        (MIPI1, main port)
-# or                                       dtoverlay=vl53l9-mipi-pi5,cam0    (MIPI0, second port — current FFC wiring)
-sudo reboot
+sudo cp scripts/99-vl53l9.rules /etc/udev/rules.d/ && sudo udevadm control --reload
 ```
 
-Confirm the CSI capture node and dummy subdev exist:
+Confirm after the reboot:
 
 ```bash
-v4l2-ctl --list-devices        # Pi 4: unicam -> /dev/video0 ; Pi 5: rp1-cfe -> /dev/video0
-ls /dev/v4l-subdev*            # the dummy-csi2 sensor node(s)
+dmesg | grep -i 'dummy\|vl53l9'      # "VL53L9 dummy CSI-2 sensor registered (link freq 500000000 Hz)"
+media-ctl -p | grep -A2 dummy-csi2   # sensor entity linked to the receiver
+ls -l /sys/devices/platform/vl53l9/  # Pi 5: xshut_cycle, xshut_state
 ```
 
 ### 2. Bring-up app
@@ -162,14 +180,41 @@ gio set ~/Desktop/lidar.desktop metadata::trusted true
 ```
 
 **Viewer keys:** `r` cycles orientation (raw / flipV / flipH / rot180), `q` quits.
-Stop everything with `sudo killall -9 python3 v4l2-ctl`.
+Stop everything with `pkill -f 'viewer/visualiz[e]'; pkill -f 'v4l2-ctl.*stream-mmap'`.
 
-**Pi 5** (CFE pipeline; no sudo except the one-time XSHUT wake):
+**Pi 5** (CFE pipeline):
 
 ```bash
-./run_lidar_web.sh                  # web dashboard on http://<pi-ip>:8080
-scripts/test/run_stream_test.sh     # headless streaming verification (FPS + stats)
+./run_lidar_web.sh                                  # web dashboard on http://<pi-ip>:8080
+VL_APP=studio ./run_lidar_web.sh                    # full Web Studio instead
+VL_APP=path/to/your_script.py ./run_lidar_web.sh  # your own Python consumer
+scripts/test/run_stream_test.sh                     # headless check (FPS + stats)
 ```
+
+Every run XSHUT-cycles the sensor first (so repeat runs start from a clean
+`READY_TO_BOOT`), finds the I²C bus the sensor answers on, and looks up the media /
+subdev / video nodes by entity name, so device numbering doesn't matter. The decoder
+stride is read back from the receiver (112 bytes on the Pi 5) rather than hard-coded.
+Without the udev rule above, the XSHUT cycle asks for sudo.
+
+### Python API
+
+`python/vl53l9_stream.py` turns the capture FIFO into numpy frames:
+
+```python
+import sys; sys.path.insert(0, "python")
+from vl53l9_stream import FrameReader
+
+with FrameReader() as reader:        # reads VL_PIPE / VL_BINNING / VL_STRIDE from env
+    for f in reader:                 # ~100 frames/s
+        f.depth_mm   # (42, 54) uint16, radial mm, 0 = invalid
+        f.valid      # (42, 54) bool   (bit 15 of the distance word)
+        f.amplitude  # (42, 54) uint16 signal strength
+        f.ambient    # (42, 54) uint16 ambient light
+```
+
+Run your own script on the live stream with
+`VL_APP=path/to/your_script.py ./run_lidar_web.sh`.
 
 Or double-click a **ToF LiDAR** desktop icon (`scripts/*.desktop`).
 
@@ -194,8 +239,9 @@ raw zones) each CSI frame is laid out as:
 [ distance u16 × N | amplitude u16 × N | ambient u16 × N | DSS 4-bit/zone | status line ]
 ```
 
-Unicam pads each 100-byte line to a 128-byte stride; the viewer de-strides, slices the
-distance array, masks the 15-bit value (`mm = raw & 0x7FFF`), reshapes to 54 × 42 and
+Unicam pads each 100-byte line to a 128-byte stride (the Pi 5 CFE to 112); the viewer de-strides, slices the
+distance array, keeps zones with bit 15 set (valid
+measurement) and masks the 15-bit value (`mm = raw & 0x7FFF`), reshapes to 54 × 42 and
 colour-maps by range. The trailing **status line** (frame counter, temperature, metadata)
 is the extra CSI row and is dropped.
 

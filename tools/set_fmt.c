@@ -1,6 +1,6 @@
-// set_fmt.c - set V4L2 format with a RAW fourcc (bypasses v4l2-ctl's name table).
-// Needed on RPi5 where vendor videodev2.h redefines Bayer fourccs, e.g.
-// V4L2_PIX_FMT_SRGGB8 == 'RGGB' (standard would be 'SRGR').
+// set_fmt.c - set a V4L2 format from a raw fourcc and print the driver's answer
+// (incl. bytesperline, which the Pi 5 launchers use as the decoder stride).
+// 'RGGB' is the standard V4L2_PIX_FMT_SRGGB8 fourcc.
 //
 // usage: ./set_fmt <mode> /dev/videoN width height fourcc(4 chars)
 //   mode 0 = V4L2_BUF_TYPE_VIDEO_CAPTURE (pixel format)

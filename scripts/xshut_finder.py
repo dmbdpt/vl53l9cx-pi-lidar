@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""xshut_finder.py — find which RPi5 (RP1) GPIO line is wired to the VL53L9CX XSHUT net.
+"""xshut_finder.py — (bring-up history; result: XSHUT = connector pin 17,
+RP1 line 34 on MIPI0) find which RPi5 (RP1) GPIO line is wired to the VL53L9CX XSHUT net.
 
 Hardware setup (one wire):
   * Keep the STEVAL-VL53L9 flex cable plugged into the CSI connector (MIPI0).
@@ -29,8 +30,8 @@ Usage (on the RPi5, as root):
 
 Requires: gpiod Python bindings v2 (verified working on the target Pi).
 Safety: every line is released back to free/input at exit, including on
-Ctrl+C and exceptions. Lines 34/46 (cam0/cam1_reg enables = connector power)
-are hard-refused; lines 38-41 (camera I2C buses) need an explicit override.
+Ctrl+C and exceptions. Lines 34/46 (connector pin 17; on this board the
+XSHUT net itself, owned by dummy_cam) are hard-refused; lines 38-41 (camera I2C buses) need an explicit override.
 """
 
 import argparse
@@ -49,8 +50,11 @@ CANDIDATES_DEFAULT = [35, 37, 50, 51, 52, 53]   # free MIPI0-side candidates (se
 
 # Never drive these from userspace:
 FORBIDDEN_LINES = {
-    34: "CD0_IO0_MICCLK — cam0_reg enable (MIPI0 connector POWER rail)",
-    46: "CD1_IO0_MICCLK — cam1_reg enable (MIPI1 connector POWER rail)",
+    # Connector pin 17 (CAM_IO0). On the STEVAL-VL53L9 this IS the XSHUT net;
+    # with the vl53l9-mipi-pi5 overlay dummy_cam owns it -- use its sysfs
+    # xshut_state / xshut_cycle instead of driving it from here.
+    34: "CD0_IO0 — MIPI0 pin 17 = VL53L9 XSHUT (owned by dummy_cam)",
+    46: "CD1_IO0 — MIPI1 pin 17 = VL53L9 XSHUT (owned by dummy_cam)",
 }
 # Driving these re-muxes the camera I2C buses away from their controller mid-test:
 RISKY_LINES = {

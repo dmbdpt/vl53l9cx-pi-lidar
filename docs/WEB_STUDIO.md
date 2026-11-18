@@ -6,13 +6,15 @@ It runs as a standalone companion to the GPU particle viewer, putting the Pi's
 otherwise-idle CPU cores, RAM, and disk to work.
 
 The default web launcher (`run_lidar_web.sh`) serves the dependency-free **Web Viewer**
-(`viewer/web_view.py`). To serve this full studio on the same pipeline instead, start it
-directly (after `run_lidar_web.sh`'s bring-up steps, or with its FIFO already armed):
+(`viewer/web_view.py`). To serve this full studio on the same pipeline instead:
 
 ```bash
-VL_BINNING=2 VL_PIPE=/tmp/tof_pipe_web python3 web/lidar_web.py   # serves on :8080
+VL_APP=studio ./run_lidar_web.sh      # Pi 5: sets up the pipeline, passes VL_STRIDE etc.
 # then open  http://<pi-ip>:8080  in any browser on the LAN
 ```
+
+When starting it by hand, pass the receiver's line stride (`VL_STRIDE=112` on a Pi 5,
+128 on a Pi 4 -- the default).
 
 <p align="center"><em>Live 3D point cloud · depth heatmap · gesture recognition · record &amp; replay · PLY export</em></p>
 
