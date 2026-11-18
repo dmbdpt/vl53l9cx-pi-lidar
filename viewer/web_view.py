@@ -30,6 +30,8 @@ import time
 import math
 import json
 import struct
+import array
+import sys
 import threading
 import http.server
 import socketserver
@@ -149,12 +151,18 @@ def reader_loop():
             payload = b"".join(raw[y * STRIDE:(y + 1) * STRIDE][:CSI_W]
                                for y in range(CSI_H))
 
-            dist_raw = struct.unpack_from(f"<{N_ZONES}H", bytes(payload), 0)
-            frame = bytearray(2 * N_ZONES)
-            for i, v in enumerate(dist_raw):
-                struct.pack_into("<H", frame, 2 * i,
-                                 v & DIST_MASK if v & 0x8000 else 0)
-            STUDIO.push(bytes(frame))
+            # Bit 15 = valid measurement; invalid zones become 0. array('H')
+            # instead of a per-zone struct.pack_into loop (~230k calls/s at
+            # 100 fps was enough to fall behind the sensor on a Pi).
+            dist_raw = array.array("H")
+            dist_raw.frombytes(payload[:2 * N_ZONES])
+            if sys.byteorder == "big":
+                dist_raw.byteswap()
+            out = array.array("H", [v & DIST_MASK if v & 0x8000 else 0
+                                    for v in dist_raw])
+            if sys.byteorder == "big":
+                out.byteswap()
+            STUDIO.push(out.tobytes())
 
             n_win += 1
             now = time.time()

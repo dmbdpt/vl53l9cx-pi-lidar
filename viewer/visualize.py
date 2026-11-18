@@ -48,7 +48,8 @@ RAW_W, RAW_H, CSI_H = GEOM[BINNING]
 N_ZONES = RAW_W * RAW_H
 CH_LEN = N_ZONES * 2          # bytes per u16 channel (distance/amplitude/ambient)
 CSI_W = 100
-STRIDE = 128
+# Receiver line stride: Pi 4 Unicam pads 100-byte lines to 128, Pi 5 CFE to 112.
+STRIDE = int(os.environ.get("VL_STRIDE", "128"))
 FRAME_BYTES = STRIDE * CSI_H
 DIST_MASK = 0x7FFF
 
@@ -308,7 +309,8 @@ try:
             # so apply a fixed +3 offset in 3D and keep 2D as-is. User-facing
             # orient 0 is now correct by default in both.
             eff_orient = (ORIENT + 3) % 4 if view3d else ORIENT
-            dist_mm = orient((linear[0:CH_LEN].view("<u2") & DIST_MASK).reshape(RAW_H, RAW_W), eff_orient)
+            _d = linear[0:CH_LEN].view("<u2")
+            dist_mm = orient(np.where(_d & 0x8000, _d & DIST_MASK, 0).astype(np.uint16).reshape(RAW_H, RAW_W), eff_orient)
 
             chan = CHANNELS[chan_idx]
             if chan == "distance":

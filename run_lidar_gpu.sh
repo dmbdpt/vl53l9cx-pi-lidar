@@ -19,7 +19,7 @@ echo "========================================================="
 [ -p "$PIPE" ] || { rm -f "$PIPE"; mkfifo "$PIPE"; }
 
 echo "[+] Clearing previous processes..."
-sudo killall -9 python3 v4l2-ctl vl53l9_bringup 2>/dev/null
+pkill -f 'viewer/visualiz[e]' 2>/dev/null; pkill -f 'v4l2-ctl.*stream-mmap' 2>/dev/null; sudo pkill -x vl53l9_bringup 2>/dev/null
 sleep 1
 export DISPLAY=:0
 
@@ -40,4 +40,4 @@ sudo ./vl53l9_bringup $USECASE $EXP $PERIOD $POWER $DSS 2>&1 \
 
 echo "[+] GPU particle viewer on the local monitor (DISPLAY=:0)."
 echo "    Mouse: left-drag orbits, scroll zooms.  Keys: r=orient f=reset-view q=quit"
-echo "    Stop everything: sudo killall -9 python3 v4l2-ctl"
+echo "    Stop everything: pkill -f 'viewer/visualiz[e]'; pkill -f 'v4l2-ctl.*stream-mmap'"
