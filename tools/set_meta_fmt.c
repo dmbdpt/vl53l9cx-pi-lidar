@@ -17,6 +17,15 @@
 #include <sys/ioctl.h>
 #include <linux/videodev2.h>
 
+#ifndef V4L2_META_FMT_GENERIC_8
+/* Pre-6.10 uapi headers: no meta width/height. Build a stub so `make tools` still works. */
+int main(void)
+{
+	fprintf(stderr, "set_meta_fmt needs >= 6.10 uapi headers (linux-libc-dev)\n");
+	return 1;
+}
+#else
+
 int main(int argc, char **argv)
 {
 	if (argc != 5 || strlen(argv[4]) != 4) {
@@ -64,3 +73,4 @@ int main(int argc, char **argv)
 	close(fd);
 	return 0;
 }
+#endif

@@ -18,6 +18,13 @@
 #include <sys/ioctl.h>
 #include <linux/videodev2.h>
 
+/* v4l2_meta_format gained width/height with the generic metadata formats
+ * (Linux 6.10 uapi). Older userspace headers (e.g. Debian bookworm's 6.1
+ * linux-libc-dev) lack them; the video mode used by the launchers still works. */
+#ifdef V4L2_META_FMT_GENERIC_8
+#define HAVE_META_WH 1
+#endif
+
 int main(int argc, char **argv)
 {
 	if (argc != 6 || strlen(argv[5]) != 4) {
@@ -39,8 +46,14 @@ int main(int argc, char **argv)
 	f.type = meta ? V4L2_BUF_TYPE_META_CAPTURE : V4L2_BUF_TYPE_VIDEO_CAPTURE;
 
 	if (meta) {
+#ifdef HAVE_META_WH
 		f.fmt.meta.width = atoi(argv[3]);
 		f.fmt.meta.height = atoi(argv[4]);
+#else
+		fprintf(stderr, "meta mode needs >= 6.10 uapi headers; rebuild with newer linux-libc-dev\n");
+		close(fd);
+		return 1;
+#endif
 		f.fmt.meta.dataformat = v4l2_fourcc(argv[5][0], argv[5][1],
 						 argv[5][2], argv[5][3]);
 	} else {
@@ -65,6 +78,7 @@ int main(int argc, char **argv)
 	}
 
 	if (meta)
+#ifdef HAVE_META_WH
 		printf("now: %u x %u dataformat=%c%c%c%c buffersize=%u\n",
 		       f.fmt.meta.width, f.fmt.meta.height,
 		       (char)(f.fmt.meta.dataformat & 0xff),
@@ -72,6 +86,9 @@ int main(int argc, char **argv)
 		       (char)((f.fmt.meta.dataformat >> 16) & 0xff),
 		       (char)((f.fmt.meta.dataformat >> 24) & 0xff),
 		       f.fmt.meta.buffersize);
+#else
+		;
+#endif
 	else
 		printf("now: %u x %u pixelformat=%c%c%c%c bpl=%u sizeimage=%u\n",
 		       f.fmt.pix.width, f.fmt.pix.height,
