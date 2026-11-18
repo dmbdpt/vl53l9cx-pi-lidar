@@ -191,6 +191,14 @@ int vl53l9_init(void *const p_dev) {
     fprintf(stderr, "[init] issuing COMMAND_BOOT...\n");
     ret = _write_cmd(p_dev, COMMAND_BOOT, 3000);
     fprintf(stderr, "[init]   boot cmd ret=%d\n", ret);
+    /* Over Linux user-space I2C the BOOT command-ack poll can time out even
+       though the boot itself completes. The FSM reaching STANDBY (checked
+       next) is the authoritative result, so don't abort here on a TIMEOUT --
+       aborting would skip the FW-version check and _init_default_config(). */
+    if (ret == VL53L9_ERROR_TIMEOUT) {
+        fprintf(stderr, "[init]   boot cmd ack timed out; trusting the FSM instead\n");
+        ret = VL53L9_ERROR_NONE;
+    }
     CHECK_RET(ret);
     fprintf(stderr, "[init] waiting STANDBY...\n");
     ret = _wait_for_state(p_dev, FSM_STATE_STANDBY, 3000);
@@ -897,7 +905,9 @@ static int _wait_for_state(void *const p_dev, _fsm_state_t state, uint32_t timeo
         current_state = _get_fsm_state(p_dev);
     } while ((current_state != state) && (elapsed_time_ms < timeout_ms));
 
-    if (elapsed_time_ms >= timeout_ms) {
+    /* Only a timeout if the state was never reached (a match on the last
+       poll used to be reported as TIMEOUT). */
+    if (current_state != state) {
         ret = VL53L9_ERROR_TIMEOUT;
     }
 

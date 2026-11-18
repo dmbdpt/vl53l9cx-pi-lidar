@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <linux/i2c.h>
 #include <linux/i2c-dev.h>
 
 #include "vl53l9.h"
@@ -39,32 +40,45 @@ static const char *fsm_name(uint8_t f) {
                  case 2: return "STANDBY"; case 3: return "STREAMING"; default: return "?"; }
 }
 
-/* --- Configurable control bus / address (RPi5 port) -----------------------
- * Bus resolution order: --i2c PATH  >  $VL_I2C_BUS  >  stable fallbacks.
- *   RPi5 MIPI0 = /dev/i2c-6 (stable DT symlink; also enumerated as i2c-10),
- *   RPi5 MIPI1 = /dev/i2c-4,  Pi 4 camera port = /dev/i2c-10. */
-static int open_i2c_bus(const char *opt_path, const char **used_out) {
+/* --- Configurable control bus / address --------------------------------
+ * Bus resolution order: --i2c PATH  >  $VL_I2C_BUS  >  auto-probe.
+ *   RPi5 MIPI0 = /dev/i2c-6,  RPi5 MIPI1 = /dev/i2c-4,  Pi 4 camera = /dev/i2c-10.
+ * Auto-probe picks the first bus on which the sensor actually ACKs a read of
+ * the FSM register -- not merely the first adapter node that opens (on a Pi 5
+ * both camera buses usually exist, whichever connector the sensor is on). */
+static int probe_ack(int fd, uint8_t addr7) {
+    uint8_t reg[2] = { (REG_FSM >> 8) & 0xFF, REG_FSM & 0xFF };
+    uint8_t val = 0;
+    struct i2c_msg msgs[2] = {
+        { .addr = addr7, .flags = 0,        .len = 2, .buf = reg  },
+        { .addr = addr7, .flags = I2C_M_RD, .len = 1, .buf = &val },
+    };
+    struct i2c_rdwr_ioctl_data set = { .msgs = msgs, .nmsgs = 2 };
+    return ioctl(fd, I2C_RDWR, &set) < 0 ? -1 : 0;
+}
+
+static int open_i2c_bus(const char *opt_path, uint8_t addr7, const char **used_out) {
     static const char *fallbacks[] = { "/dev/i2c-6", "/dev/i2c-4", "/dev/i2c-10" };
     const char *env = getenv("VL_I2C_BUS");
     int fd;
 
+    if (!opt_path && env && *env) opt_path = env;
     if (opt_path) {
         fd = open(opt_path, O_RDWR);
-        if (fd < 0) { perror("[-] --i2c"); return -1; }
+        if (fd < 0) { perror("[-] open I2C bus"); return -1; }
         *used_out = opt_path;
         return fd;
     }
-    const char *tries[4];
-    int n = 0;
-    if (env && *env) tries[n++] = env;
-    for (int i = 0; i < 3; i++) tries[n++] = fallbacks[i];
-    for (int i = 0; i < n; i++) {
-        fd = open(tries[i], O_RDWR);
-        if (fd >= 0) { *used_out = tries[i]; return fd; }
+    for (int i = 0; i < 3; i++) {
+        fd = open(fallbacks[i], O_RDWR);
+        if (fd < 0) continue;
+        if (probe_ack(fd, addr7) == 0) { *used_out = fallbacks[i]; return fd; }
+        close(fd);
     }
-    fprintf(stderr, "[-] No usable I2C adapter found (tried:");
-    for (int i = 0; i < n; i++) fprintf(stderr, "%s%s", tries[i], i + 1 < n ? ", " : "");
-    fprintf(stderr, "). Pass --i2c PATH or set VL_I2C_BUS.\n");
+    fprintf(stderr, "[-] VL53L9 did not ACK at 0x%02X on any of /dev/i2c-6, /dev/i2c-4, /dev/i2c-10.\n"
+                    "    Is XSHUT high (Pi 5: echo 1 > /sys/devices/platform/vl53l9/xshut_cycle),\n"
+                    "    is the 12 MHz sensor clock present, is the FFC seated? Or pass --i2c PATH.\n",
+            addr7);
     return -1;
 }
 
@@ -83,6 +97,10 @@ int main(int argc, char **argv) {
     }
 
     int usecase = (npos > 1) ? atoi(pos[1]) : VL53L9_USECASE_AF_RANGE;
+    if (usecase < 0 || usecase >= VL53L9_NB_USECASES) {
+        fprintf(stderr, "[-] usecase must be 0..%d (got %d)\n", VL53L9_NB_USECASES - 1, usecase);
+        return 1;
+    }
     int status = 0;
     vl53l9_device_t dev;
     memset(&dev, 0, sizeof(vl53l9_device_t));
@@ -105,7 +123,7 @@ int main(int argc, char **argv) {
 
     printf("[STEP 1/5] Connecting to camera control interface...\n");
     const char *bus_used = NULL;
-    int fd = open_i2c_bus(opt_i2c, &bus_used);
+    int fd = open_i2c_bus(opt_i2c, addr7, &bus_used);
     if (fd < 0) return 1;
     if (ioctl(fd, I2C_SLAVE, addr7) < 0) { perror("[-] Slave address failed"); close(fd); return 1; }
 
@@ -126,8 +144,8 @@ int main(int argc, char **argv) {
     int rret = vl53l9_read8(&dev, REG_FSM, &fsm);
     if (rret != 0) {
         fprintf(stderr, "[-] No sensor response at 0x%02X on %s (FSM read ret=%d).\n"
-                        "    Check FFC seating + power; a fresh XSHUT edge may be needed\n"
-                        "    (sudo: unbind/rebind dummy_cam to toggle cam0_reg / line 34).\n",
+                        "    Check FFC seating, the 12 MHz sensor clock, and XSHUT\n"
+                        "    (Pi 5: echo 1 > /sys/devices/platform/vl53l9/xshut_cycle).\n",
                 addr7, bus_used, rret);
         close(fd); return 1;
     }
@@ -147,12 +165,20 @@ int main(int argc, char **argv) {
 
     printf("\n[STEP 2/5] Initializing sensor firmware (FW patch + boot + default config)...\n");
     if (fsm == 1) {
-        /* Full boot from READY_TO_BOOT. -5 (TIMEOUT) here is a known red herring
-           over Linux I2C -- the boot still completes; key on the FSM, not the code. */
+        /* Full boot from READY_TO_BOOT. The ULD now tolerates a slow BOOT
+           command-ack and keys on the FSM, so a non-zero return here is a real
+           failure: whatever init step failed, the steps after it (FW version
+           check, ST default VCSEL/DSS config) did not run. */
         status = vl53l9_init(&dev);
         usleep(20000);
         vl53l9_read8(&dev, REG_FSM, &fsm);
         printf("[+] vl53l9_init() ret=%d, FSM now=%u (%s)\n", status, fsm, fsm_name(fsm));
+        if (status != 0) {
+            printf("[!] WARNING: vl53l9_init() failed (ret=%d) -- the ST default analog\n"
+                   "    config may NOT have been applied; depth data may be wrong. See the\n"
+                   "    [init] lines above for the failing step, then XSHUT-cycle and retry.\n", status);
+            if (fsm != 2) { close(fd); return 1; }
+        }
     } else {
         printf("[i] FSM=%s (not READY_TO_BOOT); firmware assumed resident.\n", fsm_name(fsm));
     }
@@ -166,8 +192,9 @@ int main(int argc, char **argv) {
            usecase, status, prof->binning, prof->exposure_ms, prof->context, prof->power);
     if (status != 0) {
         printf("[-] set_profile failed (ret=%d). The sensor is in a stale STANDBY that\n", status);
-        printf("    can't be reconfigured. Give it a fresh XSHUT edge (unbind/rebind dummy_cam\n");
-        printf("    or power-cycle) to get a clean READY_TO_BOOT, then re-run. FSM=%u.\n", fsm);
+        printf("    can't be reconfigured. Give it a fresh XSHUT edge (Pi 5: echo 1 >\n");
+        printf("    /sys/devices/platform/vl53l9/xshut_cycle; Pi 4: power-cycle) to get a\n");
+        printf("    clean READY_TO_BOOT, then re-run. FSM=%u.\n", fsm);
         close(fd); return 1;
     }
 
