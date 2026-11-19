@@ -49,22 +49,39 @@ I²C. The STEVAL ships strapped for a **host-supplied** clock on FFC pin 18
 
 - **Pi 5 (no board changes):** pin 18 is RP1 GPIO 35 (MIPI0) / 48 (MIPI1), which has no
   GPCLK function, only PWM1 channel 0. The overlay muxes it to PWM and `dummy_cam`
-  runs it at **12.5 MHz** (4 ticks of RP1's 50 MHz PWM clock, 50 % duty) from boot,
+  runs it at **8.33 MHz** (6 ticks of RP1's 50 MHz PWM clock, 50 % duty) from boot,
   before XSHUT is released. It reports the frequency in
   `/sys/devices/platform/vl53l9/ap_clk_hz`, and the launchers pass it to the
   bring-up app (`--ext-clock`), so the sensor's timing stays correct. The fan uses
-  PWM1 channel 3, so they don't interfere.
+  PWM1 channel 3, so they don't interfere. It is not 12 MHz because RP1 can't divide
+  50 MHz to 12 exactly, and the board's AP_CLK level shifter (PI4ULS3V204) is rated
+  for 24 Mb/s push-pull, i.e. a 12 MHz clock; 8.33 MHz keeps a margin.
 - **Boards modified for the onboard oscillator** (R25 and R23 removed): load
   `dummy_cam` with `ap_clk=0` (e.g. `options dummy_cam ap_clk=0` in
   `/etc/modprobe.d/vl53l9.conf`); the bring-up then assumes 12 MHz.
 - **Pi 4:** nothing on the 15-pin connector provides a clock; feed 12 MHz from a
   header GPCLK (e.g. GPIO 4) or enable the onboard oscillator.
 
-Check: `dmesg | grep AP_CLK` should show `AP_CLK: 12500000 Hz on PWM`, and
+Check: `dmesg | grep AP_CLK` should show `AP_CLK: 8333333 Hz on PWM`, and
 `scripts/test/run_stream_test.sh` should report ~100 fps. A clearly different rate (e.g. ~80 or ~133 fps) likely means
 the real clock and `--ext-clock` disagree (the RP1 PWM period quirk is handled by
 `dummy_cam`'s `ap_clk_legacy_tick_ns` parameter: 20 on Raspberry Pi kernels up to
 6.12, ignored on kernels with the PWM waveform API).
+
+### Wiring note — FFC pins 11/12 on a Pi 5 (read before connecting)
+
+The STEVAL's 22-pin connector (J1) puts **SYNC_IN on pin 11 and INTR on pin 12**,
+behind the board's 3.3 V level shifter. On the Pi 5's 4-lane camera connectors those
+pins are **MIPI data lane 2 (D2_N / D2_P)**, which are D-PHY inputs designed for
+~1.2 V signalling. INTR idles high, so a straight-through cable holds a 3.3 V
+logic level on one of the Pi's lane-2 pins. The driver never enables lane 2, but
+the pad still sees the voltage. Safer: use a cable or FFC breakout with **pins 11
+and 12 left unconnected** (the sensor doesn't need them here; SYNC_IN is optional and
+INTR isn't used). On 2-lane hosts (Pi Zero, CM IO boards wired for 2 lanes) these
+pins aren't lanes, which is presumably what the board was laid out for.
+
+Also set the **Host IO jumper (J3/JP3) to 3V3** (pins 1–2): the Pi's I²C, XSHUT
+and AP_CLK lines are 3.3 V.
 
 ### Wiring note — XSHUT
 

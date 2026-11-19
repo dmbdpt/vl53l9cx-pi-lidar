@@ -86,7 +86,7 @@ static int open_i2c_bus(const char *opt_path, uint8_t addr7, const char **used_o
 int main(int argc, char **argv) {
     /* Options: --i2c PATH (adapter node), --addr N (7-bit slave address),
      * --ext-clock HZ (AP_CLK frequency the sensor is fed; default 12 MHz, or
-     * $VL_EXT_CLOCK -- the Pi 5 PWM clock is 12.5 MHz, see dummy_cam).
+     * $VL_EXT_CLOCK -- the Pi 5 PWM clock is 8.33 MHz, see dummy_cam).
      * Remaining positional args: [usecase] [exp_ms] [period_us] [power_mode] [dss_mode]. */
     const char *opt_i2c = NULL;
     int opt_addr = -1;

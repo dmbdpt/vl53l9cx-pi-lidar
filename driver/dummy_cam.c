@@ -19,7 +19,8 @@
  * clock on camera connector pin 18 (CAM_IO1 / "XCLK"). On the Pi 5 that pin is
  * RP1 GPIO 35 (MIPI0) / 48 (MIPI1), which has no GPCLK function -- only
  * PWM1_CHAN0. If the DT node has a "pwms" property, this driver runs that PWM
- * as the clock (default 12.5 MHz = 4 ticks of RP1's 50 MHz PWM clock, 50% duty)
+ * as the clock (default 8.33 MHz = 6 ticks of RP1's 50 MHz PWM clock, 50% duty;
+ * the STEVAL's AP_CLK level shifter is rated 24 Mb/s = 12 MHz, so stay below)
  * from probe until remove, i.e. before XSHUT is ever released. The frequency is
  * exported as /sys/devices/platform/vl53l9/ap_clk_hz so the bring-up app can tell
  * the sensor (VL53L9 accepts 6-27 MHz). Boards using the onboard oscillator:
@@ -66,14 +67,14 @@ MODULE_PARM_DESC(ap_clk, "Drive AP_CLK from the DT 'pwms' PWM (default 1; 0 for 
  * Kernels whose PWM driver lacks the waveform API (all Raspberry Pi kernels up
  * to at least rpi-6.12) program RP1's RANGE register with period/tick, but the
  * hardware period is RANGE + 1 ticks (see the upstream pwm-rp1 driver). Request
- * one tick less there so the output really is 4 ticks = 12.5 MHz.
+ * one tick less there so the output really is 6 ticks = 8.33 MHz.
  */
 static unsigned int ap_clk_legacy_tick_ns = 20;
 module_param(ap_clk_legacy_tick_ns, uint, 0444);
 MODULE_PARM_DESC(ap_clk_legacy_tick_ns,
 		 "Legacy-PWM-API period correction in ns (default 20 = one RP1 PWM tick at 50 MHz; 0 = none)");
 
-#define VL53L9_AP_CLK_DEFAULT_HZ  12500000U
+#define VL53L9_AP_CLK_DEFAULT_HZ  8333333U
 #define VL53L9_AP_CLK_MIN_HZ      6000000U
 #define VL53L9_AP_CLK_MAX_HZ      27000000U
 

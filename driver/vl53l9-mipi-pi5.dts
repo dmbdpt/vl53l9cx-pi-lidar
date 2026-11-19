@@ -25,8 +25,10 @@
  * pin 18 (CAM_IO1 / "XCLK"). On the Pi 5 that pin is RP1 GPIO 35 (MIPI0) / 48
  * (MIPI1), which has no GPCLK function, only PWM1_CHAN0 (the fan uses
  * PWM1_CHAN3). The sensor node muxes that pin to pwm1 and dummy_cam runs channel
- * 0 at 12.5 MHz = 4 ticks of RP1's 50 MHz PWM clock (VL53L9 accepts 6-27 MHz;
- * an exact 12 MHz would need a fractional divider). Boards modified to use the
+ * 0 at 8.33 MHz = 6 ticks of RP1's 50 MHz PWM clock, 50% duty (VL53L9 accepts
+ * 6-27 MHz). Not 12 MHz: RP1 can't make it without a fractional divider, and the
+ * STEVAL routes AP_CLK through a PI4ULS3V204 auto-direction level shifter rated
+ * for 24 Mb/s push-pull (= a 12 MHz clock); 8.33 MHz (16.7 Mb/s) keeps margin. Boards modified to use the
  * onboard 12 MHz oscillator: load dummy_cam with ap_clk=0.
  *
  *   connector       AP_CLK pin (FFC 18)
@@ -41,7 +43,8 @@
  *
  * Optional: xshut_gpio=<n> overrides the XSHUT line number (applied after cam0);
  *           ap_clk_hz=<hz> changes the AP_CLK frequency (6-27 MHz; RP1 can only
- *           make 50 MHz / N, N >= 2, e.g. 12500000, 10000000, 8333333).
+ *           make 50 MHz / N, e.g. 8333333 (default), 10000000; 12500000 exceeds the
+ *           board level shifter's 24 Mb/s rating).
  *
  * Build (needs the C preprocessor for the #include):
  *     make overlay      # or see README
@@ -93,7 +96,7 @@
 				pinctrl-names = "default";
 				pinctrl-0 = <&vl53l9_apclk_pins>;
 				pwms = <&rp1_pwm1 0 80 0>;
-				vl53l9,ap-clk-hz = <12500000>;
+				vl53l9,ap-clk-hz = <8333333>;
 
 				port {
 					sensor_to_csi: endpoint {
